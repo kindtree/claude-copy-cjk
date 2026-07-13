@@ -335,11 +335,12 @@ local function isDiffLikeLine(line)
     or line:match("^%d+%s+[+%-]%s")
 end
 
--- Claude TUI content markers rendered at column 0:
---   "⏺ " response / tool-call bullet, "❯ " prompt echo.
+-- Agent-TUI content markers rendered at column 0:
+--   Claude Code: "⏺ " response / tool-call bullet, "❯ " prompt echo
+--   Codex CLI:   "• " response bullet,             "› " prompt echo
 -- The text that follows sits at margin level, so marker lines are
 -- treated as margined content with the marker removed.
-local contentMarkers = { "⏺ ", "❯ " }
+local contentMarkers = { "⏺ ", "❯ ", "• ", "› " }
 
 local function parseClaudeLine(rawLine)
   local line = rawLine:gsub("%s+$", "")

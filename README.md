@@ -2,13 +2,15 @@
 
 # claude-copy-cjk
 
-**Copy from [Claude Code](https://claude.com/claude-code)'s terminal UI. Paste clean text. Every time.**
+**English** · [简体中文](README.zh-CN.md)
+
+**Copy from the [Claude Code](https://claude.com/claude-code) or [Codex CLI](https://github.com/openai/codex) terminal UI. Paste clean text. Every time.**
 
 The clipboard cleaner that understands CJK — 中文 / 日本語 / 한국어 wraps rejoin perfectly, `修改` never becomes `修 改`.
 
 ![platform](https://img.shields.io/badge/platform-macOS-black?logo=apple)
 ![license](https://img.shields.io/badge/license-MIT-green)
-![tests](https://img.shields.io/badge/tests-44%20passing-brightgreen)
+![tests](https://img.shields.io/badge/tests-48%20passing-brightgreen)
 ![powered by](https://img.shields.io/badge/powered%20by-Hammerspoon-8A2BE2)
 ![CJK](https://img.shields.io/badge/CJK-first--class-orange)
 
@@ -18,9 +20,9 @@ The clipboard cleaner that understands CJK — 中文 / 日本語 / 한국어 wr
 
 ---
 
-Select text in Claude Code's TUI, hit `⌘C`, and your clipboard fills with rendering junk: 2-space margins on every line, `⏺` `❯` `⎿` markers, `✻ Worked for 11s` spinner lines, and hard line breaks at the terminal width that shred your paragraphs.
+Select text in an agent TUI, hit `⌘C`, and your clipboard fills with rendering junk: 2-space margins on every line, `⏺` `❯` `⎿` (Claude Code) or `•` `›` (Codex) markers, `✻ Worked for 11s` spinner lines, and hard line breaks at the terminal width that shred your paragraphs.
 
-**claude-copy-cjk** is a tiny [Hammerspoon](https://www.hammerspoon.org/) interceptor that catches `⌘C` in your terminal, scores how Claude-TUI-like the copied text is, and cleans it *before you paste* — conservatively, so code, tables, and everything non-Claude pass through untouched.
+**claude-copy-cjk** is a tiny [Hammerspoon](https://www.hammerspoon.org/) interceptor that catches `⌘C` in your terminal, scores how agent-TUI-like the copied text is, and cleans it *before you paste* — conservatively, so code, tables, and everything non-agent pass through untouched.
 
 ```diff
 - ⏺ 修复方案如下：
@@ -34,16 +36,6 @@ Select text in Claude Code's TUI, hit `⌘C`, and your clipboard fills with rend
 + 这个方案的关键在于我们可以直接复用 Hammerspoon 提供的 eventtap 机制来拦截快捷键，不需要修改任何系统设置就能生效。
 ```
 
-<details>
-<summary><b>中文简介</b></summary>
-<br>
-
-从 Claude Code 终端界面复制文字，剪贴板里全是渲染垃圾：每行 2 格边距、`⏺` `❯` `⎿` 标记、`✻ Worked for 11s` 状态行，以及按终端宽度硬折断的段落。对中文用户更糟：一般清理工具按字节算宽度，会把「修改」拆成「修 改」。
-
-本工具用 Hammerspoon 拦截终端里的 `⌘C`，先给内容打分判断是不是 Claude TUI 输出，再分级清理——中文按显示宽度正确拼接段落、词永远不被拆散；代码、表格、`ls` 输出绝不重排。装完就忘，复制即净。
-
-</details>
-
 ## Install in 30 seconds
 
 ```bash
@@ -53,19 +45,41 @@ cd claude-copy-cjk && ./install.sh
 
 The script installs [Hammerspoon](https://www.hammerspoon.org/) if missing, drops two Lua files into `~/.hammerspoon/`, and wires them into your config. Grant Accessibility permission once, reload, done — there is no UI, it just works on every `⌘C`.
 
+### Or let your AI agent install it
+
+Already inside Claude Code / Codex? Paste this prompt and it handles everything:
+
+```text
+Set up claude-copy-cjk on this Mac:
+
+1. Clone https://github.com/kindtree/claude-copy-cjk.git to ~/Code/claude-copy-cjk.
+2. Run ./install.sh from the repo root. It installs Hammerspoon via Homebrew if
+   missing, copies init.lua to ~/.hammerspoon/claude-copy.lua and clean.lua to
+   ~/.hammerspoon/clean.lua, and appends one dofile line to ~/.hammerspoon/init.lua.
+   Do not modify anything else in my Hammerspoon config.
+3. If a standalone `lua` is available, run `lua test.lua` and
+   `lua test_deficiencies.lua` inside the repo and confirm every test passes.
+4. Launch (or restart) Hammerspoon. If macOS hasn't granted it Accessibility
+   permission yet, walk me through System Settings → Privacy & Security →
+   Accessibility, then wait for my confirmation.
+5. Have me verify: select a multi-line reply in Claude Code or Codex CLI, press
+   Cmd+C, paste anywhere — it should paste flush-left with paragraphs rejoined
+   and no ⏺/•/✻ markers.
+```
+
 ## What gets fixed
 
 | Junk in your clipboard | What you paste instead |
 |---|---|
 | `··` 2-space margin on every line | Flush-left text (nested indent preserved) |
-| `⏺` `❯` `⎿` response / prompt / tool markers | Just the content |
+| `⏺` `❯` `⎿` markers (Claude Code) · `•` `›` markers (Codex CLI) | Just the content |
 | `✻ Worked for 11s` · `(ctrl+o to expand)` · `────` | Dropped entirely |
 | Paragraphs hard-wrapped at terminal width | Rejoined into real paragraphs |
 | Wrapped list items (`- …` / `1. …`), even a stranded `3. API` head | Each item back on one line |
 | Word torn at the wrap point: `修` ⏎ `改` | `修改` — joined with no stray space |
 | Trailing whitespace | Gone |
 
-And just as important, what **never** gets touched: code blocks (indentation intact), `ls`/`ps`/table output (column alignment detected and protected), shell prompts, and anything that doesn't look like Claude TUI output — the scorer is deliberately conservative, low confidence means hands off.
+And just as important, what **never** gets touched: code blocks (indentation intact), `ls`/`ps`/table output (column alignment detected and protected), shell prompts, and anything that doesn't look like agent TUI output — the scorer is deliberately conservative, low confidence means hands off.
 
 ## Why CJK needs its own fork
 
@@ -77,24 +91,25 @@ This fork rebuilds the pipeline on **UTF-8 display width**:
 - ✂️ **CJK-aware joining** — CJK has no space-based word boundaries, so joins at a CJK edge never inject a space: `修` + `改` → `修改`, never `修 改`.
 - 。**CJK punctuation** — `。！？：；…` count as sentence ends, so three short complete sentences stay three lines instead of merging into one.
 - 🏷️ **Fullwidth key-value** — `标题：…` lines keep their structure, exactly like `Title: …`.
-- 📐 **Greedy-wrap rescue** — Claude's TUI wraps at spaces, so a long unbroken CJK run gets pushed to the next line, leaving a stub like `3. API`. The reflower reasons about *why* the line broke and rejoins it.
+- 📐 **Greedy-wrap rescue** — agent TUIs wrap at spaces, so a long unbroken CJK run gets pushed to the next line, leaving a stub like `3. API`. The reflower reasons about *why* the line broke and rejoins it.
 
-All of it verified against **real Claude Code v2.1.207 renders** captured with `tmux capture-pane` — the fixtures are in this repo, not hand-typed approximations.
+All of it verified against **real TUI renders** — Claude Code v2.1.207 and Codex CLI v0.144.1, captured with `tmux capture-pane`. The fixtures are in this repo, not hand-typed approximations.
 
 ## How it works
 
 ```mermaid
 flowchart LR
     A["⌘C in a<br/>whitelisted app"] --> B["real copy happens,<br/>clipboard read"]
-    B --> C{"Claude-TUI score<br/>margins · markers ·<br/>pipes · wrap shape"}
+    B --> C{"agent-TUI score<br/>margins · markers ·<br/>pipes · wrap shape"}
     C -->|high| D["full clean<br/>strip + reflow"]
     C -->|medium| E["strip margins only"]
     C -->|low| F["untouched"]
 ```
 
-Detection is multi-signal scoring, not a single regex: margin coverage, `│`/`⎿` pipes, `⏺`/`❯` markers, diff patterns, numbered lines, markdown structure, and wrapped-line geometry all vote. Prompt-looking lines vote against. Three safety guards sit on top: never overwrite a clipboard that changed mid-clean (race), never write an empty result, never stall on a >512 KB copy.
+Detection is multi-signal scoring, not a single regex: margin coverage, `│`/`⎿` pipes, `⏺`/`❯`/`•`/`›` markers, diff patterns, numbered lines, markdown structure, and wrapped-line geometry all vote. Prompt-looking lines vote against. Three safety guards sit on top: never overwrite a clipboard that changed mid-clean (race), never write an empty result, never stall on a >512 KB copy.
 
-**Works in:** [Ghostty](https://ghostty.org/) · [iTerm2](https://iterm2.com/) · Terminal.app · [Alacritty](https://alacritty.org/) · [kitty](https://sw.kovidgoyal.net/kitty/) · [WezTerm](https://wezterm.org/) · [Hyper](https://hyper.is/) · [Warp](https://www.warp.dev/) · Rio · Tabby · Wave · [cmux](https://github.com/manaflow-ai/cmux) · Claude desktop app
+**Agent TUIs:** Claude Code · Codex CLI
+**Terminal hosts:** [Ghostty](https://ghostty.org/) · [iTerm2](https://iterm2.com/) · Terminal.app · [Alacritty](https://alacritty.org/) · [kitty](https://sw.kovidgoyal.net/kitty/) · [WezTerm](https://wezterm.org/) · [Hyper](https://hyper.is/) · [Warp](https://www.warp.dev/) · Rio · Tabby · Wave · [cmux](https://github.com/manaflow-ai/cmux) · Claude desktop app
 
 ## Configuration
 
@@ -112,10 +127,10 @@ Prefer upstream's more conservative behavior? Set the upstream values and reload
 
 ```bash
 lua test.lua               # upstream suite (21) — no regressions
-lua test_deficiencies.lua  # CJK · TUI-artifact · reflow suite (23), built on real captures
+lua test_deficiencies.lua  # CJK · TUI-artifact · reflow · Codex suite (27), built on real captures
 ```
 
-The `tui-fixture-*.txt` files are genuine Claude Code TUI screen captures; every CJK fix in this fork started life as a failing test against one of them.
+The `tui-fixture-*.txt` files are genuine Claude Code and Codex CLI screen captures; every fix in this fork started life as a failing test against one of them.
 
 ## Limitations
 
@@ -130,7 +145,7 @@ Hard fork of [andersmyrmel/claude-copy](https://github.com/andersmyrmel/claude-c
 
 ## License
 
-[MIT](LICENSE) — original copyright Anders; CJK and Claude-Code-host additions copyright kindtree.
+[MIT](LICENSE) — original copyright Anders; CJK, Codex, and Claude-Code-host additions copyright kindtree.
 
 ---
 

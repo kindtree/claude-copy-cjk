@@ -406,6 +406,63 @@ test("field: partial 1-space margin on first line is normalized", function()
 end)
 
 -- ═══════════════════════════════════════════════════════════════
+-- 14. Codex CLI support (real fixture: tui-fixture-codex.txt).
+--     Codex renders "• " response markers, "› " prompt echoes, and
+--     hanging-indent (4-space) list continuations.
+-- ═══════════════════════════════════════════════════════════════
+
+test("codex: response block cleans markers and rejoins paragraph", function()
+  local f = io.open("tui-fixture-codex.txt", "r")
+  assert(f, "codex fixture missing")
+  local input = f:read("*a"); f:close()
+  local r = clean.classify(input)
+  eq(r.mode, "full", "codex response should be full mode")
+  local result = clean.clean(input)
+  assert(not result:find("•"), "• marker must be stripped, got:\n" .. result)
+  assert(result:find("^剪贴板工具能自动保存"), "content flush-left")
+  assert(result:find("与输入，提高资料整理"), "paragraph wrap rejoined across margin lines")
+end)
+
+test("codex: hanging-indent list continuation rejoins", function()
+  local f = io.open("tui-fixture-codex.txt", "r")
+  local input = f:read("*a"); f:close()
+  local result = clean.clean(input)
+  assert(result:find("链接或代码片段。"), "4-space hanging continuation must rejoin, got:\n" .. result)
+  assert(result:find("云端同步功能。"), "second hanging continuation must rejoin")
+  local items = 0
+  for l in (result .. "\n"):gmatch("(.-)\n") do
+    if l:match("^%- ") then items = items + 1 end
+  end
+  eq(items, 3, "3 bullet items each on one line, got:\n" .. result)
+end)
+
+test("codex: › prompt echo marker is stripped", function()
+  local input = table.concat({
+    "› 请帮我分析这个文件的结构，并给出一份详细的重构建议清单，谢谢",
+    "",
+    "• 好的，我先看一下这个文件的整体结构，然后按模块给出对应的重构建议，稍等。",
+  }, "\n")
+  local r = clean.classify(input)
+  assert(r.mode ~= "none", "should clean, got none")
+  local result = (r.mode == "full") and clean.clean(input) or clean.stripOnly(input)
+  assert(not result:find("›"), "› must be stripped, got:\n" .. result)
+  assert(not result:find("•"), "• must be stripped")
+  assert(result:find("请帮我分析"), "prompt text kept")
+end)
+
+test("codex: bullet + indented real code is NOT merged", function()
+  local input = table.concat({
+    "  - 下面这一段配置直接粘贴到你的初始化文件末尾就可以立即生效了",
+    "    local ok = pcall(require, \"module\")",
+  }, "\n")
+  local r = clean.classify(input)
+  if r.mode ~= "none" then
+    local result = (r.mode == "full") and clean.clean(input) or clean.stripOnly(input)
+    assert(result:find("\n"), "code line must stay separate, got:\n" .. result)
+  end
+end)
+
+-- ═══════════════════════════════════════════════════════════════
 -- Results
 -- ═══════════════════════════════════════════════════════════════
 
