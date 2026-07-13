@@ -1,0 +1,413 @@
+#!/usr/bin/env lua
+-- Deficiency tests for claude-copy/clean.lua
+-- Fixtures are taken from a REAL Claude Code v2.1.207 TUI capture
+-- (tmux capture-pane, 100 cols) — see tui-capture-raw.txt.
+-- Run: lua test_deficiencies.lua
+
+local clean = dofile("clean.lua")
+
+local passed, failed = 0, 0
+local failures = {}
+
+local function test(name, fn)
+  local ok, err = pcall(fn)
+  if ok then
+    passed = passed + 1
+  else
+    failed = failed + 1
+    failures[#failures + 1] = name
+    io.write("FAIL: " .. name .. "\n  " .. tostring(err) .. "\n")
+  end
+end
+
+local function eq(got, expected, msg)
+  if got ~= expected then
+    error((msg or "") .. "\n  expected: " .. tostring(expected) .. "\n       got: " .. tostring(got))
+  end
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- 1. Pure-CJK wrapped paragraph (real fixture, lines 15-18)
+--    Regression: must classify full and rejoin with NO spaces
+--    inserted between CJK chars.
+-- ═══════════════════════════════════════════════════════════════
+
+local pureCJK = table.concat({
+  "  剪贴板清理工具通过监听操作系统的剪贴板事件来工作。当用户复制内容时，工具会拦截并分析该数据，判断是",
+  "  否符合删除规则。根据预设的过滤策略（如大小限制、内容类型、敏感信息检测等），工具会自动清理过期或无",
+  "  用的剪贴板条目。通过定时任务和内存管理机制，它能有效控制系统剪贴板占用的资源，防止堆积导致的性能下",
+  "  降。整个过程透明化运行，用户无需手动干预，极大提升了使用效率和系统稳定性。",
+}, "\n")
+
+test("CJK: pure Chinese paragraph classifies as full", function()
+  local r = clean.classify(pureCJK)
+  eq(r.mode, "full", "mode")
+end)
+
+test("CJK: pure Chinese paragraph rejoins seamlessly", function()
+  local result = clean.clean(pureCJK)
+  eq(result:find("\n"), nil, "should be one line")
+  assert(result:find("判断是否符合"), "boundary 是/否 must join without space")
+  assert(result:find("过期或无用的"), "boundary 无/用 must join without space")
+  assert(result:find("性能下降"), "boundary 下/降 must join without space")
+end)
+
+-- ═══════════════════════════════════════════════════════════════
+-- 2. CJK mid-word hard break in a line that ALSO contains ASCII
+--    spaces (mixed 中英文). Current code joins with " " because the
+--    previous line contains a space → "修 改" corruption.
+-- ═══════════════════════════════════════════════════════════════
+
+test("CJK: mixed line hard break must not insert space mid-word", function()
+  local input = table.concat({
+    "  这个方案的关键在于我们可以直接复用 Hammerspoon 提供的 eventtap 机制来拦截快捷键，不需要修",
+    "  改任何系统设置就能生效。",
+  }, "\n")
+  local result = clean.clean(input)
+  assert(result:find("不需要修改任何"), "修/改 must join without space, got: " .. result)
+  assert(not result:find("修 改"), "spurious space inside 修改")
+end)
+
+-- ═══════════════════════════════════════════════════════════════
+-- 3. Mixed CJK/ASCII paragraph: byte-length vs display-width.
+--    A CJK line is ~1.5x bytes per column; ASCII continuation lines
+--    fail the byte-based width check and are left unjoined.
+-- ═══════════════════════════════════════════════════════════════
+
+test("CJK: mixed-width paragraph rejoins ASCII continuation", function()
+  local input = table.concat({
+    "  这个工具的核心逻辑其实非常简单：先监听系统剪贴板的变化事件，然后按照预先定义好的规则逐条进行分析和",
+    "  过滤。The whole pipeline is written in Lua and runs inside Hammerspoon as a background",
+    "  daemon, which makes it easy to customize.",
+  }, "\n")
+  local result = clean.clean(input)
+  eq(result:find("\n"), nil, "should be one joined line, got:\n" .. result)
+  assert(result:find("background daemon"), "ASCII wrap must join with space")
+end)
+
+-- Real fixture (lines 22-25): mixed paragraph must fully rejoin.
+test("CJK: real mixed fixture rejoins into one paragraph", function()
+  local input = table.concat({
+    "  在 macOS 环境中，Hammerspoon 这个强大的自动化框架能够拦截 Cmd+C 快捷键事件，实现对 clipboard",
+    "  的实时监控。通过编写 Lua 脚本，开发者可以在每次复制操作时自动触发清理逻辑，检查 clipboard",
+    "  中的文本是否包含敏感信息。如果检测到需要处理的内容，工具会调用系统 API 自动清空 clipboard",
+    "  或替换其内容。这种方法比传统的后台守护进程更加灵活高效，特别适合需要精细化内容管理的场景。",
+  }, "\n")
+  local result = clean.clean(input)
+  eq(result:find("\n"), nil, "should be one joined line, got:\n" .. result)
+  assert(not result:find("clipboard 的 实时"), "no double-spacing artifacts")
+end)
+
+-- ═══════════════════════════════════════════════════════════════
+-- 4. ⏺ response marker (real fixture, line 13 / lines 33-34 of
+--    second capture). Must be stripped from cleaned output.
+-- ═══════════════════════════════════════════════════════════════
+
+test("TUI: ⏺ first-line marker is stripped, content joined", function()
+  local input = table.concat({
+    "⏺ 你的 Hammerspoon 配置目录包含 init.lua 主入口、claude-copy.lua 复制工具脚本、clean.lua",
+    "  清理工具脚本，以及存放第三方插件的 Spoons 文件夹。",
+  }, "\n")
+  local r = clean.classify(input)
+  assert(r.mode == "full" or r.mode == "strip", "should clean, got " .. r.mode)
+  local result = (r.mode == "full") and clean.clean(input) or clean.stripOnly(input)
+  assert(not result:find("⏺"), "⏺ marker must be stripped, got: " .. result)
+  assert(result:find("^你的 Hammerspoon"), "content must start at column 0")
+end)
+
+test("TUI: ⏺ heading + margined body cleans without markers", function()
+  local input = table.concat({
+    "⏺ 1. 纯中文段落",
+    "",
+    "  剪贴板清理工具通过监听操作系统的剪贴板事件来工作。当用户复制内容时，工具会拦截并分析该数据，判断是",
+    "  否符合删除规则。根据预设的过滤策略（如大小限制、内容类型、敏感信息检测等），工具会自动清理过期或无",
+    "  用的剪贴板条目。",
+  }, "\n")
+  local r = clean.classify(input)
+  assert(r.mode == "full" or r.mode == "strip", "should clean, got " .. r.mode)
+  local result = (r.mode == "full") and clean.clean(input) or clean.stripOnly(input)
+  assert(not result:find("⏺"), "⏺ must be stripped")
+end)
+
+-- ═══════════════════════════════════════════════════════════════
+-- 5. ❯ prompt-echo marker and ✻ spinner/status lines (real fixture
+--    lines 38, 41 and "Listed 1 directory (ctrl+o to expand)").
+-- ═══════════════════════════════════════════════════════════════
+
+test("TUI: sweep copy drops spinner + expand-hint chrome lines", function()
+  local input = table.concat({
+    "❯ 运行 ls -la ~/.hammerspoon 看看有哪些文件，然后用一句话总结",
+    "",
+    "  Listed 1 directory (ctrl+o to expand)",
+    "",
+    "⏺ 你的 Hammerspoon 配置目录包含 init.lua 主入口、claude-copy.lua 复制工具脚本、clean.lua",
+    "  清理工具脚本，以及存放第三方插件的 Spoons 文件夹。",
+    "",
+    "✻ Worked for 11s",
+  }, "\n")
+  local r = clean.classify(input)
+  assert(r.mode == "full" or r.mode == "strip", "should clean, got " .. r.mode)
+  local result = (r.mode == "full") and clean.clean(input) or clean.stripOnly(input)
+  assert(not result:find("✻"), "spinner line must be dropped, got:\n" .. result)
+  assert(not result:find("ctrl%+o to expand"), "expand-hint chrome must be dropped")
+  assert(not result:find("❯"), "prompt marker must be stripped")
+  assert(result:find("运行 ls %-la"), "prompt text itself must be kept")
+  assert(result:find("Spoons 文件夹"), "answer text must survive")
+end)
+
+test("TUI: ⎿ tool-result marker is stripped", function()
+  local input = table.concat({
+    "⏺ Bash(ls -la ~/.hammerspoon)",
+    "  ⎿  total 64",
+    "     drwxr-xr-x   6 alex  staff   192 Mar 31 10:30 .",
+    "     -rw-r--r--   1 alex  staff  3853 Mar 30 22:05 claude-copy.lua",
+  }, "\n")
+  local r = clean.classify(input)
+  if r.mode ~= "none" then
+    local result = (r.mode == "full") and clean.clean(input) or clean.stripOnly(input)
+    assert(not result:find("⎿"), "⎿ marker must be stripped, got:\n" .. result)
+  end
+end)
+
+-- ═══════════════════════════════════════════════════════════════
+-- 6. Code-line misclassification → prose join corruption.
+-- ═══════════════════════════════════════════════════════════════
+
+test("code: call with trailing lua comment is not joined into prose", function()
+  local input = table.concat({
+    "  这一行是普通的介绍文字它非常长非常长非常长非常长非常长非常长非常长非常长非常长非常长非常长非常",
+    "  hs.pasteboard.clearContents()  -- 清空剪贴板内容",
+  }, "\n")
+  local result = clean.clean(input)
+  assert(result:find("\n"), "code line must stay on its own line, got:\n" .. result)
+end)
+
+test("code: bare closing bracket line is not joined into prose", function()
+  local input = table.concat({
+    "  这一行是普通的介绍文字它非常长非常长非常长非常长非常长非常长非常长非常长非常长非常长非常长非常",
+    "  end)",
+  }, "\n")
+  local result = clean.clean(input)
+  assert(result:find("\n"), "'end)' must stay on its own line, got:\n" .. result)
+end)
+
+test("code: lua comment line is code-like, not prose", function()
+  local input = table.concat({
+    "  这一行是普通的介绍文字它非常长非常长非常长非常长非常长非常长非常长非常长非常长非常长非常长非常",
+    "  -- Hammerspoon 剪贴板监控脚本",
+  }, "\n")
+  local result = clean.clean(input)
+  assert(result:find("\n"), "lua comment must stay on its own line, got:\n" .. result)
+end)
+
+-- Real fixture code block (lines 29-36): must survive full clean intact.
+test("code: real lua block keeps all lines separate", function()
+  local input = table.concat({
+    "  -- Hammerspoon 剪贴板监控脚本",
+    "  hs.hotkey.bind({'cmd'}, 'c', function()",
+    "    -- 捕获 Cmd+C 事件",
+    "    local pasteboard = hs.pasteboard.readString()",
+    "    if pasteboard and string.len(pasteboard) > 1000 then",
+    "      hs.pasteboard.clearContents()  -- 清空超过限制的剪贴板内容",
+    "    end",
+    "  end)",
+  }, "\n")
+  local r = clean.classify(input)
+  if r.mode ~= "none" then
+    local result = (r.mode == "full") and clean.clean(input) or clean.stripOnly(input)
+    local n = select(2, result:gsub("\n", "")) + 1
+    eq(n, 8, "all 8 code lines must stay separate, got:\n" .. result)
+  end
+end)
+
+-- ═══════════════════════════════════════════════════════════════
+-- 7. CJK structural lines: fullwidth-colon key-value pairs.
+-- ═══════════════════════════════════════════════════════════════
+
+test("CJK: fullwidth-colon key-value lines stay separate", function()
+  local input = table.concat({
+    "  标题：一个关于剪贴板自动清理工具的完整介绍文档说明",
+    "  描述：这份文档详细讲解了工具的安装步骤和配置方法以及注意事项",
+  }, "\n")
+  local result = clean.clean(input)
+  assert(result:find("\n"), "Key：value lines must stay separate, got:\n" .. result)
+end)
+
+-- ═══════════════════════════════════════════════════════════════
+-- 8. CJK sentence-end punctuation recognized in wrap detection:
+--    short standalone lines each ending with 。must not count as
+--    wrapped pairs (they are complete sentences / list-ish rows).
+-- ═══════════════════════════════════════════════════════════════
+
+test("CJK: short standalone sentences are not reflowed", function()
+  local input = table.concat({
+    "  第一步，安装依赖工具。",
+    "  第二步，复制配置文件。",
+    "  第三步，重新加载配置。",
+  }, "\n")
+  local r = clean.classify(input)
+  if r.mode == "full" then
+    local result = clean.clean(input)
+    local n = select(2, result:gsub("\n", "")) + 1
+    eq(n, 3, "three complete sentences must stay as 3 lines, got:\n" .. result)
+  end
+end)
+
+-- ═══════════════════════════════════════════════════════════════
+-- 9. Full pipeline on the complete real capture sweep.
+-- ═══════════════════════════════════════════════════════════════
+
+test("e2e: full sweep of real capture cleans markers and keeps content", function()
+  local f = io.open("tui-fixture-sweep.txt", "r")
+  assert(f, "fixture file missing")
+  local input = f:read("*a")
+  f:close()
+  local normalized = clean.recoverNumberedBlock(input)
+  local r = clean.classify(normalized)
+  assert(r.mode == "full" or r.mode == "strip", "sweep should clean, got " .. r.mode)
+  local result = (r.mode == "full") and clean.clean(normalized) or clean.stripOnly(normalized)
+  assert(not result:find("⏺"), "no ⏺ in output")
+  assert(not result:find("✻"), "no spinner lines in output")
+  assert(result:find("剪贴板清理工具通过监听"), "paragraph 1 content kept")
+  assert(result:find("hs%.hotkey%.bind"), "code content kept")
+end)
+
+-- ═══════════════════════════════════════════════════════════════
+-- 10. Wrapped list items (real fixture: Claude TUI renders bullet
+--     continuations at margin level; greedy word-wrap can leave a
+--     very short head like "3. API" before a long CJK run).
+-- ═══════════════════════════════════════════════════════════════
+
+test("list: wrapped bullet/numbered items classify full and rejoin", function()
+  local f = io.open("tui-fixture-lists.txt", "r")
+  assert(f, "fixture file missing")
+  local input = f:read("*a"); f:close()
+  local r = clean.classify(input)
+  eq(r.mode, "full", "wrapped list items need full mode")
+  local result = clean.clean(input)
+  for l in (result .. "\n"):gmatch("(.-)\n") do
+    assert(not l:match("^%s+%S"), "no leading spaces on: [" .. l .. "]")
+  end
+  local items = 0
+  for l in (result .. "\n"):gmatch("(.-)\n") do
+    if l:match("^[%-%d]") then items = items + 1 end
+  end
+  eq(items, 7, "4 bullets + 3 numbered items, got:\n" .. result)
+  assert(result:find("Python脚本实现") or result:find("Python 脚本实现"), "bullet 1 rejoined")
+  assert(result:find("ELK Stack方案实现") or result:find("ELK Stack 方案实现"), "numbered 1 rejoined")
+  assert(result:find("API文档自动生成") or result:find("API 文档自动生成"), "short-head '3. API' rejoined")
+end)
+
+test("list: complete short bullets stay separate", function()
+  local input = table.concat({
+    "  - 第一项说明。",
+    "  - 第二项说明。",
+    "  - 第三项说明。",
+  }, "\n")
+  local r = clean.classify(input)
+  if r.mode ~= "none" then
+    local result = (r.mode == "full") and clean.clean(input) or clean.stripOnly(input)
+    local n = select(2, result:gsub("\n", "")) + 1
+    eq(n, 3, "3 bullets stay 3 lines, got:\n" .. result)
+  end
+end)
+
+-- ═══════════════════════════════════════════════════════════════
+-- 11. Column/table-like output must never be reflowed.
+-- ═══════════════════════════════════════════════════════════════
+
+test("table: ls-style column output is not joined", function()
+  local input = table.concat({
+    "  total 64",
+    "  drwxr-xr-x   6 alex  staff   192 Mar 31 10:30 spoons",
+    "  -rw-r--r--   1 alex  staff  3853 Mar 30 22:05 claude-copy.lua",
+    "  -rw-r--r--   1 alex  staff  1140 Mar 31 10:30 clean.lua",
+  }, "\n")
+  local r = clean.classify(input)
+  if r.mode ~= "none" then
+    local result = (r.mode == "full") and clean.clean(input) or clean.stripOnly(input)
+    local n = select(2, result:gsub("\n", "")) + 1
+    eq(n, 4, "4 rows stay 4 lines, got:\n" .. result)
+  end
+end)
+
+-- ═══════════════════════════════════════════════════════════════
+-- 12. Whole-line copies: common leading indent is removed, but
+--     relative (nested) indentation is preserved.
+-- ═══════════════════════════════════════════════════════════════
+
+test("dedent: deep-selected block loses common leading spaces", function()
+  local input = table.concat({
+    "     drwxr-xr-x   6 alex  staff   192 spoons",
+    "     -rw-r--r--   1 alex  staff  3853 claude-copy.lua",
+    "     -rw-r--r--   1 alex  staff  1140 clean.lua",
+  }, "\n")
+  local r = clean.classify(input)
+  assert(r.mode ~= "none", "margined block should clean, got none")
+  local result = (r.mode == "full") and clean.clean(input) or clean.stripOnly(input)
+  for l in (result .. "\n"):gmatch("(.-)\n") do
+    if l:match("%S") then
+      assert(not l:match("^%s"), "leading spaces remain on: [" .. l .. "]")
+    end
+  end
+end)
+
+test("dedent: relative indentation is preserved", function()
+  local input = table.concat({
+    "  下面是代码示例的说明文字这一行要足够长足够长足够长足够长足够长足够长",
+    "      local x = 1",
+    "          local y = 2",
+  }, "\n")
+  local r = clean.classify(input)
+  if r.mode ~= "none" then
+    local result = (r.mode == "full") and clean.clean(input) or clean.stripOnly(input)
+    assert(result:find("\nlocal x = 1\n") or result:find("\nlocal x = 1$"),
+      "outer code line at col 0, got:\n" .. result)
+    assert(result:find("\n    local y = 2"),
+      "nested code keeps deeper indent, got:\n" .. result)
+  end
+end)
+
+-- ═══════════════════════════════════════════════════════════════
+-- 13. User field report: whole-line copy of margined bullets in a
+--     wide window (each item one line). Must paste with no leading
+--     spaces. Variant: selection started at column 1, leaving a
+--     partial 1-space margin on the first line.
+-- ═══════════════════════════════════════════════════════════════
+
+local fieldBullets = table.concat({
+  "  - 列表项折行识别：- item / 1. item 现在作为折行源参与检测，续行正确拼回成完整一行；",
+  "  - 贪婪折行救援拼接：短头行（如 3. API）+ 下一行首个词放不进上一行，判定为折行点，照样拼接；",
+  "  - 列对齐守卫：行内出现 3 连空格（ls、ps、表格列）永不重排；",
+  "  - 统一去公共缩进：输出前把所有行共有的最小缩进剥掉，嵌套的相对缩进保留。",
+}, "\n")
+
+test("field: margined bullet block pastes flush-left", function()
+  local r = clean.classify(fieldBullets)
+  assert(r.mode ~= "none", "must clean, got none")
+  local result = (r.mode == "full") and clean.clean(fieldBullets) or clean.stripOnly(fieldBullets)
+  for l in (result .. "\n"):gmatch("(.-)\n") do
+    if l:match("%S") then
+      assert(l:match("^%- "), "bullet must start at column 0: [" .. l .. "]")
+    end
+  end
+end)
+
+test("field: partial 1-space margin on first line is normalized", function()
+  local input = fieldBullets:gsub("^  ", " ", 1)  -- selection started at col 1
+  local r = clean.classify(input)
+  assert(r.mode ~= "none", "must clean, got none")
+  local result = (r.mode == "full") and clean.clean(input) or clean.stripOnly(input)
+  for l in (result .. "\n"):gmatch("(.-)\n") do
+    if l:match("%S") then
+      assert(l:match("^%- "), "bullet must start at column 0: [" .. l .. "]")
+    end
+  end
+end)
+
+-- ═══════════════════════════════════════════════════════════════
+-- Results
+-- ═══════════════════════════════════════════════════════════════
+
+io.write(string.format("\n%d passed, %d failed\n", passed, failed))
+os.exit(failed > 0 and 1 or 0)

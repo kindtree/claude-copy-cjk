@@ -1,0 +1,26 @@
+⏺ 1. 纯中文段落
+
+  剪贴板清理工具通过监听操作系统的剪贴板事件来工作。当用户复制内容时，工具会拦截并分析该数据，判断是
+  否符合删除规则。根据预设的过滤策略（如大小限制、内容类型、敏感信息检测等），工具会自动清理过期或无
+  用的剪贴板条目。通过定时任务和内存管理机制，它能有效控制系统剪贴板占用的资源，防止堆积导致的性能下
+  降。整个过程透明化运行，用户无需手动干预，极大提升了使用效率和系统稳定性。
+
+  2. 中英文混排段落
+
+  在 macOS 环境中，Hammerspoon 这个强大的自动化框架能够拦截 Cmd+C 快捷键事件，实现对 clipboard
+  的实时监控。通过编写 Lua 脚本，开发者可以在每次复制操作时自动触发清理逻辑，检查 clipboard
+  中的文本是否包含敏感信息。如果检测到需要处理的内容，工具会调用系统 API 自动清空 clipboard
+  或替换其内容。这种方法比传统的后台守护进程更加灵活高效，特别适合需要精细化内容管理的场景。
+
+  3. Lua 代码块
+
+  -- Hammerspoon 剪贴板监控脚本
+  hs.hotkey.bind({'cmd'}, 'c', function()
+    -- 捕获 Cmd+C 事件
+    local pasteboard = hs.pasteboard.readString()
+    if pasteboard and string.len(pasteboard) > 1000 then
+      hs.pasteboard.clearContents()  -- 清空超过限制的剪贴板内容
+    end
+  end)
+
+✻ Cogitated for 18s

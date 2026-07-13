@@ -1,0 +1,1027 @@
+-- claude-copy/clean.lua: Pure text-processing logic for cleaning
+-- Claude Code clipboard artifacts. No Hammerspoon dependencies.
+
+local M = {}
+
+-- ═══════════════════════════════════════════════════════════════
+-- Configuration
+-- ═══════════════════════════════════════════════════════════════
+
+local config = {
+  minNonEmptyLines = 1,
+  minMarginCoverage = 0.50,
+  stripOnlyThreshold = 2,
+  fullCleanThreshold = 7,
+  noPipeFullCleanThreshold = 6,
+  noPipeMinWrappedPairsForFull = 2,
+  wrapMinLineLength = 24,
+  wrapSimilarityDelta = 12,
+  wrapJoinSlack = 15,
+  wrapMinInferredWidth = 40,
+}
+
+-- Full set of keywords that identify a line as code-like.
+-- Used by isCodeLikeLine() / startsWithCodeKeyword().
+local codeKeywords = {
+  "async",
+  "await",
+  "case",
+  "catch",
+  "class",
+  "const",
+  "def",
+  "else",
+  "elseif",
+  "enum",
+  "export",
+  "finally",
+  "for",
+  "from",
+  "function",
+  "if",
+  "impl",
+  "import",
+  "interface",
+  "let",
+  "local",
+  "package",
+  "private",
+  "protected",
+  "public",
+  "return",
+  "struct",
+  "switch",
+  "try",
+  "type",
+  "var",
+  "while",
+}
+
+-- Subset of codeKeywords used to detect line-number prefixes.
+-- Kept tighter to avoid false positives (e.g. "42 else" is ambiguous,
+-- "42 const" almost certainly has a line number prefix).
+local lineNumberKeywords = {
+  "async",
+  "await",
+  "catch",
+  "class",
+  "const",
+  "def",
+  "enum",
+  "export",
+  "for",
+  "function",
+  "if",
+  "import",
+  "interface",
+  "let",
+  "local",
+  "return",
+  "struct",
+  "try",
+  "type",
+  "var",
+  "while",
+}
+
+-- ═══════════════════════════════════════════════════════════════
+-- UTF-8 / Display Width Utilities
+--
+-- Terminal wrapping happens at display columns, not bytes. CJK
+-- characters occupy 2 columns but 3 bytes in UTF-8, so all wrap
+-- heuristics must measure display width, never byte length.
+-- ═══════════════════════════════════════════════════════════════
+
+-- Decode the UTF-8 codepoint starting at byte offset i.
+-- Malformed sequences fall back to (lead byte, length 1) so bad
+-- clipboard data can never crash the pipeline.
+local function decodeCodepoint(s, i)
+  local b1 = s:byte(i)
+  if not b1 then return nil, 1 end
+  if b1 < 0x80 then return b1, 1 end
+  local len, cp
+  if b1 >= 0xF0 then len, cp = 4, b1 - 0xF0
+  elseif b1 >= 0xE0 then len, cp = 3, b1 - 0xE0
+  elseif b1 >= 0xC0 then len, cp = 2, b1 - 0xC0
+  else return b1, 1 end
+  for k = i + 1, i + len - 1 do
+    local b = s:byte(k)
+    if not b or b < 0x80 or b >= 0xC0 then return b1, 1 end
+    cp = cp * 0x40 + (b - 0x80)
+  end
+  return cp, len
+end
+
+-- East Asian Wide / Fullwidth (wcwidth-lite: CJK, kana, hangul,
+-- fullwidth forms, CJK punctuation and extensions).
+local function isWideCp(cp)
+  if not cp then return false end
+  return (cp >= 0x1100 and cp <= 0x115F)
+    or (cp >= 0x2E80 and cp <= 0xA4CF)
+    or (cp >= 0xAC00 and cp <= 0xD7A3)
+    or (cp >= 0xF900 and cp <= 0xFAFF)
+    or (cp >= 0xFE30 and cp <= 0xFE4F)
+    or (cp >= 0xFF00 and cp <= 0xFF60)
+    or (cp >= 0xFFE0 and cp <= 0xFFE6)
+    or (cp >= 0x20000 and cp <= 0x3FFFD)
+end
+
+local function displayWidth(s)
+  local w, i, n = 0, 1, #s
+  while i <= n do
+    local cp, len = decodeCodepoint(s, i)
+    w = w + (isWideCp(cp) and 2 or 1)
+    i = i + len
+  end
+  return w
+end
+
+local function firstCp(s)
+  return (decodeCodepoint(s, 1))
+end
+
+local function lastCp(s)
+  local n = #s
+  if n == 0 then return nil end
+  local i = n
+  while i > 1 and i > n - 3 do
+    local b = s:byte(i)
+    if b < 0x80 or b >= 0xC0 then break end
+    i = i - 1
+  end
+  return (decodeCodepoint(s, i))
+end
+
+-- Sentence-final punctuation, ASCII and CJK.
+local sentenceEndPunct = {
+  [0x2E] = true, [0x21] = true, [0x3F] = true, [0x3A] = true, [0x3B] = true,
+  [0x3002] = true, [0xFF01] = true, [0xFF1F] = true, [0xFF1A] = true, [0xFF1B] = true,
+  [0x2026] = true,
+}
+
+local function endsWithSentencePunct(s)
+  local cp = lastCp(s)
+  return cp ~= nil and sentenceEndPunct[cp] == true
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- Claude TUI Chrome Detection
+--
+-- Lines that are pure UI furniture (spinner summaries, expand
+-- hints, separators). They carry no content and are dropped.
+-- ═══════════════════════════════════════════════════════════════
+
+local spinnerGlyphs = { "✻", "✽", "✢", "✳", "∗" }
+
+local function isChromeLine(text)
+  if text:match("%(ctrl%+o to expand%)%s*$") then return true end
+  if text:match("%(esc to interrupt%)%s*$") then return true end
+  -- Full-width TUI separator rows (─ repeated); 5+ chars avoids
+  -- clashing with anything a human would write.
+  if text:match("^─+$") and #text >= 15 then return true end
+  for _, g in ipairs(spinnerGlyphs) do
+    if text:sub(1, #g) == g then
+      local rest = text:sub(#g + 1)
+      -- "✻ Worked for 11s", "✻ Cogitated for 1m 5s", "✻ Baking…"
+      if rest:match("^%s") and (rest:match(" for %d") or rest:match("…")) then
+        return true
+      end
+    end
+  end
+  return false
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- Text Utilities
+-- ═══════════════════════════════════════════════════════════════
+
+local function splitLines(text)
+  text = text:gsub("\r\n", "\n"):gsub("\r", "\n")
+  local lines = {}
+  for line in (text .. "\n"):gmatch("(.-)\n") do
+    lines[#lines + 1] = line
+  end
+  if #lines > 0 and lines[#lines] == "" then
+    table.remove(lines)
+  end
+  return lines
+end
+
+-- A selection that starts mid-margin can capture a fragment of the
+-- 2-space margin (e.g. " - item" with a single leading space). If
+-- every other non-empty line carries the full margin, the first
+-- line's partial leading whitespace is a selection artifact.
+local function normalizePartialFirstLine(text)
+  local lines = splitLines(text)
+  local firstIdx = nil
+  local others, othersWithMargin = 0, 0
+  for idx, l in ipairs(lines) do
+    if l:match("%S") then
+      if not firstIdx then
+        firstIdx = idx
+      else
+        others = others + 1
+        if l:match("^  ") then othersWithMargin = othersWithMargin + 1 end
+      end
+    end
+  end
+  if not firstIdx or others == 0 or othersWithMargin ~= others then return text end
+  local first = lines[firstIdx]
+  if first:match("^  ") or not first:match("^%s") then return text end
+  lines[firstIdx] = first:gsub("^%s+", "")
+  return table.concat(lines, "\n")
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- Line Classification
+-- ═══════════════════════════════════════════════════════════════
+
+local function isLineNumberPrefixed(line)
+  if line:match("^%d+%s%s+%S") then return true end
+  local num, rest = line:match("^(%d+)%s+(.+)$")
+  if not num or not rest then return false end
+  local n = tonumber(num)
+  if not n or n < 1 or n > 999 then return false end
+
+  for _, keyword in ipairs(lineNumberKeywords) do
+    if rest:match("^" .. keyword .. "%f[%A]") then
+      return true
+    end
+  end
+  if rest:match("^//") or rest:match("^/%*") then return true end
+  if rest:match("^[%[{(]") then return true end
+  if rest:match("^[%a_][%w_]*%s*[%({=:.]") then return true end
+
+  return false
+end
+
+-- "标题：值" — fullwidth-colon key-value pairs. Only when the colon
+-- sits near the start (≤ ~8 CJK chars) with no space before it, so
+-- prose sentences containing ： later on are not affected.
+local function hasCJKKeyColon(line)
+  local pos = line:find("：", 1, true)
+  return pos ~= nil and pos <= 25 and not line:sub(1, pos - 1):match("%s")
+end
+
+local function isStructuralLine(line)
+  return line:match("^[%-%*%+] ")
+    or line:match("^%d+%.%s")
+    or line:match("^%d+%s+[+%-]%s")
+    or isLineNumberPrefixed(line)
+    or line:match("^#+%s")
+    or line:match("^[$#] ")
+    or line:match("^%*%*")
+    or line:match("^%-%-%-")
+    or line:match("^___")
+    or line:match("^%u[%w_]-:%s")
+    or hasCJKKeyColon(line)
+    or (line:match("^#%w") and not line:match("#%w+%s+#%w"))
+end
+
+-- Keywords that commonly start English sentences. When one of these
+-- starts a line with no code syntax (brackets, semicolons, assignment),
+-- treat as prose rather than code.
+local ambiguousKeywords = {
+  ["if"] = true, ["for"] = true, ["from"] = true, ["while"] = true,
+  ["try"] = true, ["type"] = true, ["case"] = true, ["let"] = true,
+}
+
+local function startsWithCodeKeyword(line)
+  for _, keyword in ipairs(codeKeywords) do
+    if line:match("^%s*" .. keyword .. "%f[%A]") then
+      if ambiguousKeywords[keyword] and not line:match("[%(%)%{%}%[%];=]") then
+        return false
+      end
+      return true
+    end
+  end
+  return false
+end
+
+local function isCodeLikeLine(line)
+  if not line:match("%S") then return false end
+  if line:match("^```") then return true end
+  if isLineNumberPrefixed(line) then return true end
+  if startsWithCodeKeyword(line) then return true end
+  if line:match("^%s*//") or line:match("^%s*/%*") then return true end
+  if line:match("^%s*%-%-") then return true end
+  if line:match("^%s*[%{%}%[%]]%s*$") then return true end
+  if line:match("^%s*[%w_%.:%[%]\"'`%-]+%s*=%s*[^=]") then return true end
+  if line:match("[%{%};]") then return true end
+  if line:match("=>") or line:match("::") then return true end
+  if line:match("^%s*[%w_%.:]+%b()%s*$") then return true end
+  if line:match("^%s*[%w_%.:]+%b()%s*[%{%:]%s*$") then return true end
+  -- call followed only by a trailing lua-style comment
+  if line:match("^%s*[%w_%.:]+%b()%s*%-%-") then return true end
+  -- line of nothing but closing brackets: ")", "})", "]);" ...
+  if line:match("^%s*[%)%]%}][%)%]%}%,;%s]*$") then return true end
+  -- lua block terminators: "end", "end)", "end)," ...
+  if line:match("^%s*end%s*[%)%]%}%,;]*%s*$") then return true end
+  return false
+end
+
+local function isPromptLike(line)
+  return line:match("^[$#] ")
+    or line:match("^[%w_.-]+@[%w_.-]+[:~/%w%._%-]*[%$#] ")
+    or line:match("^%[[^%]]+%][%$#] ")
+end
+
+local function isDiffLikeLine(line)
+  return line:match("^@@")
+    or line:match("^diff%s+%-%-git")
+    or line:match("^index%s+[%w%.]+")
+    or line:match("^%-%-%-")
+    or line:match("^%+%+%+")
+    or line:match("^%d+%s+[+%-]%s")
+end
+
+-- Claude TUI content markers rendered at column 0:
+--   "⏺ " response / tool-call bullet, "❯ " prompt echo.
+-- The text that follows sits at margin level, so marker lines are
+-- treated as margined content with the marker removed.
+local contentMarkers = { "⏺ ", "❯ " }
+
+local function parseClaudeLine(rawLine)
+  local line = rawLine:gsub("%s+$", "")
+
+  local hadMarker = false
+  for _, m in ipairs(contentMarkers) do
+    if line:sub(1, #m) == m then
+      line = line:sub(#m + 1)
+      hadMarker = true
+      break
+    end
+  end
+
+  local hasMargin = hadMarker
+    or (line:match("^  ") ~= nil and line:match("%S") ~= nil)
+  local hadPipe = line:match("^  │") ~= nil
+
+  if hasMargin and not hadMarker then
+    line = line:gsub("^  ", "", 1)
+    line = line:gsub("^│ ?", "", 1)
+  end
+
+  -- "⎿  result" tool-result marker (rendered inside the margin).
+  local hadToolMarker = false
+  if line:sub(1, 3) == "⎿" then
+    line = line:gsub("^⎿%s*", "", 1)
+    hadToolMarker = true
+  end
+
+  local nonEmpty = line:match("%S") ~= nil
+
+  return {
+    text = line,
+    nonEmpty = nonEmpty,
+    hasMargin = hasMargin,
+    hadPipe = hadPipe or hadToolMarker,
+    hadMarker = hadMarker,
+    chrome = nonEmpty and isChromeLine(line) or false,
+    width = displayWidth(line),
+    indented = line:match("^    %S") ~= nil or line:match("^\t") ~= nil,
+    -- Runs of 3+ internal (non-leading) spaces = column-aligned
+    -- output (ls, ps, tables). Never a reflow candidate.
+    tableLike = (line:gsub("^%s+", "")):find("   ", 1, true) ~= nil,
+    codeLike = isCodeLikeLine(line),
+  }
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- Flattened Line Recovery
+--
+-- When the terminal copies numbered code (e.g. diff or editor
+-- output), it can collapse multiple visual lines into a single
+-- clipboard line. These functions detect and re-split them.
+-- ═══════════════════════════════════════════════════════════════
+
+local function collectLineNumberStarts(flat)
+  local startsByPos = {}
+  local diffStarts = 0
+
+  local function addIfLineStart(pos)
+    if pos <= 1 then return end
+    if flat:sub(pos - 1, pos - 1):match("%s") then
+      startsByPos[pos] = true
+    end
+  end
+
+  -- Diff-style: "42 + " or "42 - "
+  for pos in flat:gmatch("()%d+%s+[+%-]%s") do
+    addIfLineStart(pos)
+    diffStarts = diffStarts + 1
+  end
+
+  -- "42 keyword"
+  for _, keyword in ipairs(lineNumberKeywords) do
+    for pos, num in flat:gmatch("()(%d+)%s+" .. keyword .. "%f[%A]") do
+      if tonumber(num) >= 1 and tonumber(num) <= 999 then
+        addIfLineStart(pos)
+      end
+    end
+  end
+
+  -- "42 //" or "42 /*"
+  for pos, num in flat:gmatch("()(%d+)%s+//") do
+    if tonumber(num) >= 1 and tonumber(num) <= 999 then addIfLineStart(pos) end
+  end
+  for pos, num in flat:gmatch("()(%d+)%s+/%*") do
+    if tonumber(num) >= 1 and tonumber(num) <= 999 then addIfLineStart(pos) end
+  end
+
+  -- "42 [", "42 {", "42 ("
+  for pos, num in flat:gmatch("()(%d+)%s+[%[{(]") do
+    if tonumber(num) >= 1 and tonumber(num) <= 999 then addIfLineStart(pos) end
+  end
+
+  -- "42 identifier(" or "42 identifier="
+  for pos, num in flat:gmatch("()(%d+)%s+([%a_][%w_]*)([%({=:.])") do
+    if tonumber(num) >= 1 and tonumber(num) <= 999 then addIfLineStart(pos) end
+  end
+
+  -- Chained line numbers: "42 43 + " (two numbers before diff marker)
+  for pos, firstNum, sep in flat:gmatch("()(%d+)(%s+)%d+%s+[+%-]%s") do
+    addIfLineStart(pos)
+    addIfLineStart(pos + #firstNum + #sep)
+  end
+
+  -- Chained: "42 43  X" (two numbers, second followed by double-space + content)
+  for pos, firstNum, sep in flat:gmatch("()(%d+)(%s+)%d+%s%s+%S") do
+    addIfLineStart(pos)
+    addIfLineStart(pos + #firstNum + #sep)
+  end
+
+  -- Chained: "42 43 keyword"
+  for _, keyword in ipairs(lineNumberKeywords) do
+    for pos, firstNum, sep in flat:gmatch("()(%d+)(%s+)%d+%s+" .. keyword .. "%f[%A]") do
+      addIfLineStart(pos)
+      addIfLineStart(pos + #firstNum + #sep)
+    end
+  end
+
+  -- "42  X" (number, single space, double-space, content)
+  for pos in flat:gmatch("()%d+%s%s+%S") do
+    addIfLineStart(pos)
+  end
+
+  local starts = {}
+  for pos in pairs(startsByPos) do
+    starts[#starts + 1] = pos
+  end
+  table.sort(starts)
+  return starts, diffStarts
+end
+
+local function hasPlausibleNumberProgression(flat, starts)
+  if #starts < 3 then return false end
+
+  local numbers = {}
+  for _, pos in ipairs(starts) do
+    local num = tonumber(flat:match("^(%d+)", pos))
+    if num then numbers[#numbers + 1] = num end
+  end
+  if #numbers < 3 then return false end
+
+  local plausible = 0
+  for i = 2, #numbers do
+    local delta = numbers[i] - numbers[i - 1]
+    if delta >= 0 and delta <= 25 then
+      plausible = plausible + 1
+    end
+  end
+
+  return plausible >= math.max(2, math.floor((#numbers - 1) * 0.6))
+end
+
+local function recoverFlattenedNumberedLine(flat)
+  -- Fast path: a flattened numbered line needs ≥3 embedded numbered
+  -- segments, so short or digit-free lines can never qualify. This
+  -- skips ~30 pattern scans per ordinary line on large clipboards.
+  if #flat < 60 or not flat:find("%d") then return flat end
+
+  local starts, diffStarts = collectLineNumberStarts(flat)
+  if #starts < 3 then return flat end
+
+  if diffStarts < 2 and not hasPlausibleNumberProgression(flat, starts) then
+    return flat
+  end
+
+  local splitAt = {}
+  for _, pos in ipairs(starts) do
+    splitAt[pos] = true
+  end
+
+  local out = {}
+  for i = 1, #flat do
+    if splitAt[i] then out[#out + 1] = "\n" end
+    out[#out + 1] = flat:sub(i, i)
+  end
+
+  local rebuilt = table.concat(out):gsub("^%s*\n", "")
+
+  local normalized = {}
+  for _, line in ipairs(splitLines(rebuilt)) do
+    local trimmed = line:gsub("^%s+", "")
+    if trimmed:match("^%d+%s") then
+      normalized[#normalized + 1] = "  " .. trimmed
+    else
+      normalized[#normalized + 1] = line
+    end
+  end
+
+  local finalLines = {}
+  for _, line in ipairs(normalized) do
+    local prefix, num = line:match("^(.-[%]%)};,])%s+(%d+)$")
+    local n = tonumber(num)
+    if prefix and n and n >= 1 and n <= 999 then
+      finalLines[#finalLines + 1] = prefix
+      finalLines[#finalLines + 1] = "  " .. tostring(n)
+    else
+      finalLines[#finalLines + 1] = line
+    end
+  end
+
+  return table.concat(finalLines, "\n")
+end
+
+local function recoverFlattenedNumberedBlock(text)
+  local lines = splitLines(text)
+  if #lines == 0 then return text end
+
+  local changed = false
+  local rebuiltLines = {}
+  for _, line in ipairs(lines) do
+    local recovered = recoverFlattenedNumberedLine(line)
+    if recovered ~= line then changed = true end
+    rebuiltLines[#rebuiltLines + 1] = recovered
+  end
+
+  if not changed then return text end
+  return table.concat(rebuiltLines, "\n")
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- Clipboard Classification
+--
+-- Scores clipboard content on multiple signals to decide:
+--   "full"  → strip margins + rejoin wrapped paragraphs
+--   "strip" → strip margins only (no reflow)
+--   "none"  → leave untouched
+-- ═══════════════════════════════════════════════════════════════
+
+local function classifyClaudeClipboard(text)
+  text = normalizePartialFirstLine(text)
+  local lines = splitLines(text)
+  if #lines == 0 then
+    return { mode = "none", score = 0 }
+  end
+
+  local nonEmpty = 0
+  local marginLines = 0
+  local pipeLines = 0
+  local markerLines = 0
+  local promptLike = 0
+  local diffLike = 0
+  local codeLike = 0
+  local numberedLines = 0
+  local markdownStructural = 0
+  local wrappedPairs = 0
+  local previousWrapCandidate = nil
+  local previousListItem = nil
+  local maxProseWidth = 0
+  local firstLineNoMargin = false
+  local seenFirstNonEmpty = false
+
+  -- "- item" / "1. item" markdown list heads: their continuations
+  -- wrap to plain margin level, so they are wrap sources too.
+  local function isListItemLine(parsed)
+    return not parsed.codeLike
+      and (parsed.text:match("^[%-%*%+] ") ~= nil or parsed.text:match("^%d+%.%s") ~= nil)
+  end
+
+  for _, rawLine in ipairs(lines) do
+    local parsed = parseClaudeLine(rawLine)
+
+    if parsed.chrome then
+      -- UI furniture: not content, but also not evidence against
+      -- Claude-ness. Skip it entirely (acts as a paragraph break).
+      previousWrapCandidate = nil
+      previousListItem = nil
+    elseif parsed.nonEmpty then
+      nonEmpty = nonEmpty + 1
+      if not seenFirstNonEmpty then
+        seenFirstNonEmpty = true
+        firstLineNoMargin = not parsed.hasMargin
+      end
+      if parsed.hasMargin then marginLines = marginLines + 1 end
+      if parsed.hadPipe then pipeLines = pipeLines + 1 end
+      if parsed.hadMarker then markerLines = markerLines + 1 end
+      if isPromptLike(parsed.text) then promptLike = promptLike + 1 end
+      if isDiffLikeLine(parsed.text) then diffLike = diffLike + 1 end
+      if parsed.codeLike then codeLike = codeLike + 1 end
+      if isLineNumberPrefixed(parsed.text) then numberedLines = numberedLines + 1 end
+      local t = parsed.text
+      if t:match("^%d+%.%s") or t:match("^[%-%*%+] ") or t:match("^#+%s") then
+        markdownStructural = markdownStructural + 1
+      end
+
+      local isWrapCandidate = not parsed.codeLike
+        and not parsed.tableLike
+        and not isStructuralLine(parsed.text)
+        and not isPromptLike(parsed.text)
+        and not isLineNumberPrefixed(parsed.text)
+        and not isDiffLikeLine(parsed.text)
+        and parsed.width >= config.wrapMinLineLength
+
+      if isWrapCandidate then
+        if parsed.width > maxProseWidth then maxProseWidth = parsed.width end
+        if previousWrapCandidate then
+          local prevWidth = previousWrapCandidate.width
+          local similarWidth = math.abs(prevWidth - parsed.width) <= config.wrapSimilarityDelta
+          local previousLooksWrapped = not endsWithSentencePunct(previousWrapCandidate.text)
+          local previousFillsWidth = maxProseWidth > 0 and prevWidth >= maxProseWidth - 5
+          if (similarWidth or previousFillsWidth) and (previousLooksWrapped or previousFillsWidth) then
+            wrappedPairs = wrappedPairs + 1
+          end
+        elseif previousListItem
+          and not endsWithSentencePunct(previousListItem.text)
+          and (previousListItem.width >= config.wrapMinInferredWidth
+            or parsed.width >= config.wrapMinInferredWidth)
+        then
+          -- List item hard-wrapped into a margin-level continuation.
+          -- Greedy word wrap can leave a very short head ("3. API")
+          -- before a long CJK run, so either side being long counts.
+          wrappedPairs = wrappedPairs + 1
+        end
+        previousWrapCandidate = parsed
+        previousListItem = nil
+      elseif parsed.nonEmpty
+        and not parsed.codeLike
+        and not parsed.tableLike
+        and not isStructuralLine(parsed.text)
+        and not isPromptLike(parsed.text)
+        and parsed.width < config.wrapMinLineLength
+      then
+        -- Short tail after a long line: hard break at terminal width.
+        local wrapSource = previousWrapCandidate or previousListItem
+        if wrapSource and wrapSource.width >= config.wrapMinInferredWidth then
+          wrappedPairs = wrappedPairs + 1
+        end
+        previousWrapCandidate = nil
+        previousListItem = nil
+      else
+        previousWrapCandidate = nil
+        previousListItem = isListItemLine(parsed) and parsed or nil
+      end
+    else
+      previousWrapCandidate = nil
+      previousListItem = nil
+    end
+  end
+
+  if nonEmpty < config.minNonEmptyLines then
+    return { mode = "none", score = 0 }
+  end
+
+  -- Partial copy: first line has no margin (selection started mid-line),
+  -- but remaining lines do. Exclude the first line from coverage calc.
+  local partialCopy = firstLineNoMargin and nonEmpty >= 2 and marginLines == (nonEmpty - 1)
+  local coverageDenom = partialCopy and (nonEmpty - 1) or nonEmpty
+  local marginCoverage = marginLines / coverageDenom
+  if marginCoverage < config.minMarginCoverage then
+    return { mode = "none", score = 0 }
+  end
+
+  if promptLike > 0 and pipeLines == 0 and diffLike == 0 then
+    return { mode = "none", score = 0 }
+  end
+
+  -- Score: positive signals increase confidence, negative signals decrease.
+  local score = 0
+
+  if pipeLines > 0 then score = score + 5 end
+
+  if marginCoverage >= 0.95 then score = score + 3
+  elseif marginCoverage >= 0.85 then score = score + 2
+  else score = score + 1
+  end
+
+  if diffLike >= 2 then score = score + 3
+  elseif diffLike == 1 then score = score + 1
+  end
+
+  if wrappedPairs >= 3 then score = score + 3
+  elseif wrappedPairs >= 2 then score = score + 2
+  elseif wrappedPairs == 1 then score = score + 1
+  end
+
+  if promptLike > 0 then
+    score = score - math.min(4, promptLike * 2)
+  end
+
+  if pipeLines == 0 and codeLike == nonEmpty and diffLike == 0 and wrappedPairs == 0 then
+    score = score - 3
+  end
+
+  -- ⏺/❯ content markers are distinctive Claude TUI evidence.
+  if markerLines > 0 then score = score + 2 end
+
+  if numberedLines >= 2 then score = score + 2 end
+
+  if markdownStructural >= 3 then score = score + 2
+  elseif markdownStructural >= 2 then score = score + 1
+  end
+
+  if partialCopy then score = score + 1 end
+  if marginCoverage < 0.75 then score = score - 1 end
+
+  -- Decide mode from score.
+  local mode = "none"
+  if pipeLines > 0 then
+    if score >= config.fullCleanThreshold then
+      mode = "full"
+    elseif score >= config.stripOnlyThreshold then
+      mode = "strip"
+    end
+  else
+    if numberedLines < 2
+      and diffLike == 0
+      and score >= config.noPipeFullCleanThreshold
+      and wrappedPairs >= config.noPipeMinWrappedPairsForFull
+      and codeLike < nonEmpty
+    then
+      mode = "full"
+    elseif marginCoverage >= 0.95
+      and codeLike == 0
+      and wrappedPairs >= 1
+      and numberedLines == 0
+      and diffLike == 0
+      and promptLike == 0
+    then
+      mode = "full"
+    elseif score >= config.stripOnlyThreshold then
+      mode = "strip"
+    elseif marginCoverage >= 0.95 then
+      mode = "strip"
+    end
+  end
+
+  return {
+    mode = mode,
+    score = score,
+    nonEmpty = nonEmpty,
+    marginCoverage = marginCoverage,
+    pipeLines = pipeLines,
+    diffLike = diffLike,
+    numberedLines = numberedLines,
+    markdownStructural = markdownStructural,
+    wrappedPairs = wrappedPairs,
+  }
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- Cleaning
+-- ═══════════════════════════════════════════════════════════════
+
+-- Strip uniform minimum indent from contiguous code blocks.
+-- Handles extra box padding that some terminals preserve beyond
+-- the 2-space margin and pipe character.
+local function dedentCodeBlocks(lines)
+  local i = 1
+  while i <= #lines do
+    if lines[i].nonEmpty and (lines[i].codeLike or lines[i].indented) then
+      local blockStart = i
+      local lastCodeLine = i
+      local j = i + 1
+      while j <= #lines do
+        if lines[j].nonEmpty then
+          if lines[j].codeLike or lines[j].indented then
+            lastCodeLine = j
+          else
+            break
+          end
+        end
+        j = j + 1
+      end
+      local blockEnd = lastCodeLine
+
+      local minIndent = math.huge
+      for k = blockStart, blockEnd do
+        if lines[k].nonEmpty and not lines[k].text:match("^```") then
+          local spaces = lines[k].text:match("^(%s*)")
+          if #spaces < minIndent then minIndent = #spaces end
+        end
+      end
+
+      if minIndent > 0 and minIndent < math.huge then
+        for k = blockStart, blockEnd do
+          if lines[k].nonEmpty then
+            local spaces = lines[k].text:match("^(%s*)")
+            if #spaces >= minIndent then
+              lines[k].text = lines[k].text:sub(minIndent + 1)
+              lines[k].indented = lines[k].text:match("^    %S") ~= nil
+                or lines[k].text:match("^\t") ~= nil
+            end
+          end
+        end
+      end
+
+      i = blockEnd + 1
+    else
+      i = i + 1
+    end
+  end
+end
+
+local function inferWrapWidth(lines)
+  local maxWidth = 0
+  for _, parsed in ipairs(lines) do
+    if parsed.nonEmpty and not parsed.chrome and not parsed.indented
+      and not parsed.codeLike and not parsed.tableLike then
+      if parsed.width > maxWidth then maxWidth = parsed.width end
+    end
+  end
+  return maxWidth
+end
+
+-- Whole-line selections always capture whatever indent is left of
+-- the content. Remove the indent shared by EVERY non-empty output
+-- line (relative/nested indentation is preserved).
+local function dedentCommon(linesArr)
+  local minIndent = math.huge
+  for _, l in ipairs(linesArr) do
+    if l:match("%S") then
+      local spaces = l:match("^ *")
+      if #spaces < minIndent then minIndent = #spaces end
+      if minIndent == 0 then return linesArr end
+    end
+  end
+  if minIndent == math.huge then return linesArr end
+  for k, l in ipairs(linesArr) do
+    if l:match("%S") then
+      linesArr[k] = l:sub(minIndent + 1)
+    end
+  end
+  return linesArr
+end
+
+-- Full clean: strip margins, dedent code blocks, rejoin wrapped paragraphs.
+local function cleanClaudeTUI(text)
+  text = normalizePartialFirstLine(text)
+  local lines = {}
+  for _, rawLine in ipairs(splitLines(text)) do
+    lines[#lines + 1] = parseClaudeLine(rawLine)
+  end
+
+  dedentCodeBlocks(lines)
+  local wrapWidth = inferWrapWidth(lines)
+
+  -- Partial copy: first non-empty line lacks margin (selection started mid-line).
+  -- Its apparent length is shorter than the wrap width, so skip the
+  -- "short line = intentional break" heuristic for that first line.
+  local firstLinePartial = false
+  do
+    local neCount, marginCount = 0, 0
+    local firstHasNoMargin = false
+    for _, l in ipairs(lines) do
+      if l.nonEmpty then
+        neCount = neCount + 1
+        if l.hasMargin then marginCount = marginCount + 1 end
+        if neCount == 1 then firstHasNoMargin = not l.hasMargin end
+      end
+    end
+    firstLinePartial = firstHasNoMargin and neCount >= 2 and marginCount == (neCount - 1)
+  end
+
+  local result = {}
+  local i = 1
+  local atFirstLine = true
+  while i <= #lines do
+    local cur = lines[i]
+
+    if cur.chrome then
+      -- UI furniture: drop the line entirely.
+    elseif not cur.nonEmpty then
+      result[#result + 1] = ""
+      atFirstLine = false
+    elseif cur.indented or cur.codeLike or cur.tableLike then
+      result[#result + 1] = cur.text
+      atFirstLine = false
+    else
+      local para = cur.text
+      local lastLineWidth = cur.width
+      local lastLineText = cur.text
+      local skipWidthCheck = atFirstLine and firstLinePartial
+      while i + 1 <= #lines do
+        local nxt = lines[i + 1]
+        if not nxt.nonEmpty then break end
+        if nxt.chrome then break end
+        if nxt.indented then break end
+        if nxt.codeLike then break end
+        if nxt.tableLike then break end
+        if isStructuralLine(nxt.text) then break end
+        if not skipWidthCheck
+          and wrapWidth >= config.wrapMinInferredWidth
+          and lastLineWidth < wrapWidth - config.wrapJoinSlack then
+          -- Rescue: the TUI wraps greedily at spaces, so a long next
+          -- "word" (e.g. an unbroken CJK run after "3. API") explains
+          -- a short previous line — that is still a wrap point.
+          local firstWord = nxt.text:match("^%s*(%S+)") or ""
+          if endsWithSentencePunct(lastLineText)
+            or lastLineWidth + 1 + displayWidth(firstWord) <= wrapWidth then
+            break
+          end
+        end
+        -- Narrow content (no reliable wrap width): a line ending in
+        -- sentence-final punctuation is a complete sentence, not a
+        -- wrap point. Common for short CJK list-like rows.
+        if not skipWidthCheck
+          and wrapWidth < config.wrapMinInferredWidth
+          and endsWithSentencePunct(lastLineText) then
+          break
+        end
+        skipWidthCheck = false
+        i = i + 1
+        local nxtText = nxt.text:match("^%s*(.-)$")
+        -- Separator: CJK has no space-based word boundaries — if
+        -- either side of the join is a wide (CJK) char, join without
+        -- a space so words like 修改 are never split as 修 改.
+        -- Otherwise: a previous line with no spaces means the
+        -- terminal hard-broke mid-word — also join without space.
+        local separator
+        if isWideCp(lastCp(lastLineText)) or isWideCp(firstCp(nxtText)) then
+          separator = ""
+        else
+          separator = lastLineText:find(" ") and " " or ""
+        end
+        lastLineWidth = displayWidth(nxtText)
+        lastLineText = nxtText
+        para = para .. separator .. nxtText
+      end
+      result[#result + 1] = para
+      atFirstLine = false
+    end
+
+    i = i + 1
+  end
+
+  -- Dropped chrome lines leave blank gaps: collapse runs of blank
+  -- lines and trim blank edges.
+  local out = {}
+  for _, l in ipairs(result) do
+    if l == "" then
+      if #out > 0 and out[#out] ~= "" then out[#out + 1] = "" end
+    else
+      out[#out + 1] = l
+    end
+  end
+  while #out > 0 and out[#out] == "" do table.remove(out) end
+
+  return table.concat(dedentCommon(out), "\n")
+end
+
+-- Strip-only clean: remove margins and stray bare line numbers, no reflow.
+local function cleanClaudeTUIStripOnly(text)
+  text = normalizePartialFirstLine(text)
+  local lines = {}
+  for _, rawLine in ipairs(splitLines(text)) do
+    lines[#lines + 1] = parseClaudeLine(rawLine)
+  end
+
+  dedentCodeBlocks(lines)
+
+  local function isDiffOrNumbered(lineText)
+    return isLineNumberPrefixed(lineText) or lineText:match("^%d+%s+[+%-]%s") ~= nil
+  end
+
+  local result = {}
+  for i, parsed in ipairs(lines) do
+    local lineText = parsed.text
+    local bareLineNumber = lineText:match("^%d+$") ~= nil
+
+    if parsed.chrome then
+      -- UI furniture: drop.
+    elseif bareLineNumber then
+      local prev = (lines[i - 1] and lines[i - 1].text) or ""
+      local nxt = (lines[i + 1] and lines[i + 1].text) or ""
+      if not (isDiffOrNumbered(prev) or isDiffOrNumbered(nxt)) then
+        result[#result + 1] = lineText
+      end
+    else
+      result[#result + 1] = lineText
+    end
+  end
+
+  return table.concat(dedentCommon(result), "\n")
+end
+
+-- ═══════════════════════════════════════════════════════════════
+-- Public API
+-- ═══════════════════════════════════════════════════════════════
+
+M.classify = classifyClaudeClipboard
+M.clean = cleanClaudeTUI
+M.stripOnly = cleanClaudeTUIStripOnly
+M.recoverNumberedBlock = recoverFlattenedNumberedBlock
+
+return M
