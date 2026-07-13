@@ -24,6 +24,12 @@
 
 **agent-copy-cjk** 是一个极小的 [Hammerspoon](https://www.hammerspoon.org/) 拦截器：捕获终端里的 `⌘C`，先给复制内容打分判断是不是 agent TUI 输出，再**在你粘贴之前**分级清理。策略刻意保守——代码、表格、以及一切不像 agent 输出的内容原样放行。
 
+<div align="center">
+<img src="assets/social-cn.svg" alt="直接复制 vs 装了 agent-copy-cjk：终端回复粘出来带边距、● ✻ 怪符号、句子被拆断「修改」变「修 改」，对比顶格干净、句子完整的一段。" width="100%">
+</div>
+
+一段代码风格的 before/after：
+
 ```diff
 - ⏺ 修复方案如下：
 -

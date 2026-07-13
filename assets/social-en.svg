@@ -1,0 +1,52 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 1240 780" font-family="'Inter','Helvetica Neue',Arial,sans-serif">
+  <rect width="1240" height="780" fill="#f4f6f8"/>
+
+  <!-- Title -->
+  <text x="620" y="60" text-anchor="middle" font-size="34" font-weight="700" fill="#1a1f26">Copy a Claude Code / Codex reply in your terminal</text>
+  <text x="620" y="100" text-anchor="middle" font-size="22" fill="#6b7684">Paste into Slack, Notion, any doc — terminal-only, the web apps paste clean</text>
+
+  <!-- ═══ LEFT CARD: plain copy (dirty) ═══ -->
+  <rect x="55" y="150" width="490" height="470" rx="18" fill="#ffffff" stroke="#e5534b" stroke-width="2.5"/>
+  <rect x="55" y="150" width="490" height="58" rx="18" fill="#fdecea"/>
+  <rect x="55" y="180" width="490" height="28" fill="#fdecea"/>
+  <text x="82" y="188" font-size="25" font-weight="700" fill="#c0362c">✕　Plain copy</text>
+
+  <g font-size="21" fill="#2b3038" font-family="'SF Mono',Menlo,monospace">
+    <text x="80" y="256"><tspan fill="#e5534b" opacity="0.5">··</tspan> <tspan fill="#d29922">●</tspan> The key idea is we can just</text>
+    <text x="80" y="292"><tspan fill="#e5534b" opacity="0.5">··</tspan> reuse the existing eventtap</text>
+    <text x="80" y="328"><tspan fill="#e5534b" opacity="0.5">··</tspan> mechanism, no system changes</text>
+    <text x="80" y="364"><tspan fill="#e5534b" opacity="0.5">··</tspan> needed to make it work.</text>
+    <text x="80" y="400" fill="#9aa4b0" font-style="italic">✻ Worked for 11s</text>
+  </g>
+
+  <line x1="82" y1="446" x2="518" y2="446" stroke="#f0d4d1" stroke-width="1.5"/>
+  <text x="82" y="484" font-size="19" fill="#c0362c">Every line indented · stray ● ✻ symbols</text>
+  <text x="82" y="516" font-size="19" fill="#c0362c">One paragraph chopped into broken lines</text>
+  <text x="82" y="580" font-size="20" fill="#6b7684">➜ still cleaning up by hand after paste</text>
+
+  <!-- ═══ MIDDLE ARROW ═══ -->
+  <text x="620" y="380" text-anchor="middle" font-size="52" fill="#2f81f7">➜</text>
+  <text x="620" y="426" text-anchor="middle" font-size="19" font-weight="700" fill="#2f81f7">agent-copy-cjk</text>
+  <text x="620" y="452" text-anchor="middle" font-size="16" fill="#8a94a0">auto-cleaned on copy</text>
+
+  <!-- ═══ RIGHT CARD: with tool (clean) ═══ -->
+  <rect x="695" y="150" width="490" height="470" rx="18" fill="#ffffff" stroke="#2da44e" stroke-width="2.5"/>
+  <rect x="695" y="150" width="490" height="58" rx="18" fill="#e9f7ee"/>
+  <rect x="695" y="180" width="490" height="28" fill="#e9f7ee"/>
+  <text x="722" y="188" font-size="25" font-weight="700" fill="#1a7f37">✓　With agent-copy-cjk</text>
+
+  <g font-size="21" fill="#2b3038" font-family="'SF Mono',Menlo,monospace">
+    <text x="720" y="274">The key idea is we can just reuse</text>
+    <text x="720" y="310">the existing eventtap mechanism, no</text>
+    <text x="720" y="346">system changes needed to make it work.</text>
+  </g>
+
+  <line x1="722" y1="446" x2="1158" y2="446" stroke="#cdebd5" stroke-width="1.5"/>
+  <text x="722" y="484" font-size="19" fill="#1a7f37">Flush-left · no stray symbols</text>
+  <text x="722" y="516" font-size="19" fill="#1a7f37">Back to one clean paragraph</text>
+  <text x="722" y="580" font-size="20" fill="#6b7684">➜ paste and go, nothing to fix</text>
+
+  <!-- ═══ BOTTOM BANNER ═══ -->
+  <rect x="55" y="668" width="1130" height="72" rx="16" fill="#1a1f26"/>
+  <text x="620" y="713" text-anchor="middle" font-size="26" font-weight="600" fill="#ffffff">Copy AI replies in your terminal — stop hand-fixing margins and broken lines</text>
+</svg>

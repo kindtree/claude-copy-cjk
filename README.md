@@ -24,6 +24,12 @@ Select text in an agent TUI, hit `⌘C`, and your clipboard fills with rendering
 
 **agent-copy-cjk** is a tiny [Hammerspoon](https://www.hammerspoon.org/) interceptor that catches `⌘C` in your terminal, scores how agent-TUI-like the copied text is, and cleans it *before you paste* — conservatively, so code, tables, and everything non-agent pass through untouched.
 
+<div align="center">
+<img src="assets/social-en.svg" alt="Plain copy vs agent-copy-cjk: a terminal reply pasted with margins, stray ●/✻ symbols and a paragraph chopped into broken lines, versus one clean flush-left paragraph." width="100%">
+</div>
+
+The junk above is plain English — margins, stray markers, a paragraph shredded across lines. CJK gets a whole extra failure mode on top (see [below](#why-cjk-needs-its-own-fork)); a CJK before/after:
+
 ```diff
 - ⏺ 修复方案如下：
 -
