@@ -1,6 +1,6 @@
 <div align="center">
 
-# claude-copy-cjk
+# agent-copy-cjk
 
 [English](README.md) · **简体中文**
 
@@ -22,7 +22,7 @@
 
 在 agent 终端界面里选中文字按 `⌘C`，剪贴板里全是渲染垃圾：每行开头 2 格边距、`⏺` `❯` `⎿`（Claude Code）或 `•` `›`（Codex）标记、`✻ Worked for 11s` 状态行，还有按终端宽度硬折断的段落——粘到哪里都是碎的。
 
-**claude-copy-cjk** 是一个极小的 [Hammerspoon](https://www.hammerspoon.org/) 拦截器：捕获终端里的 `⌘C`，先给复制内容打分判断是不是 agent TUI 输出，再**在你粘贴之前**分级清理。策略刻意保守——代码、表格、以及一切不像 agent 输出的内容原样放行。
+**agent-copy-cjk** 是一个极小的 [Hammerspoon](https://www.hammerspoon.org/) 拦截器：捕获终端里的 `⌘C`，先给复制内容打分判断是不是 agent TUI 输出，再**在你粘贴之前**分级清理。策略刻意保守——代码、表格、以及一切不像 agent 输出的内容原样放行。
 
 ```diff
 - ⏺ 修复方案如下：
@@ -36,11 +36,17 @@
 + 这个方案的关键在于我们可以直接复用 Hammerspoon 提供的 eventtap 机制来拦截快捷键，不需要修改任何系统设置就能生效。
 ```
 
+### Codex CLI 同样适用
+
+Codex 有自己的一套垃圾——`•` 回复标记、`›` 输入回显、悬挂缩进的列表折行。同一个拦截器，同样干净的粘贴：
+
+<img src="assets/hero-codex.svg" alt="Codex CLI 清理前：• 标记、边距、悬挂缩进折行。清理后：顶格文本，列表项拼回一行。" width="100%">
+
 ## 30 秒安装
 
 ```bash
-git clone https://github.com/kindtree/claude-copy-cjk.git
-cd claude-copy-cjk && ./install.sh
+git clone https://github.com/kindtree/agent-copy-cjk.git
+cd agent-copy-cjk && ./install.sh
 ```
 
 脚本会自动装 [Hammerspoon](https://www.hammerspoon.org/)（如果没有）、把两个 Lua 文件放进 `~/.hammerspoon/` 并接入配置。授一次辅助功能权限、重载配置就完事——没有界面，之后每次 `⌘C` 自动生效。
@@ -50,9 +56,9 @@ cd claude-copy-cjk && ./install.sh
 已经在用 Claude Code / Codex？把下面这段 prompt 原样发给它，全程自动搞定：
 
 ```text
-在这台 Mac 上帮我装好 claude-copy-cjk：
+在这台 Mac 上帮我装好 agent-copy-cjk：
 
-1. 把 https://github.com/kindtree/claude-copy-cjk.git 克隆到 ~/Code/claude-copy-cjk。
+1. 把 https://github.com/kindtree/agent-copy-cjk.git 克隆到 ~/Code/agent-copy-cjk。
 2. 在仓库根目录运行 ./install.sh。它会在缺少 Hammerspoon 时用 Homebrew 安装、
    把 init.lua 复制为 ~/.hammerspoon/claude-copy.lua、clean.lua 复制为
    ~/.hammerspoon/clean.lua，并向 ~/.hammerspoon/init.lua 追加一行 dofile。

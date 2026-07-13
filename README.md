@@ -1,6 +1,6 @@
 <div align="center">
 
-# claude-copy-cjk
+# agent-copy-cjk
 
 **English** · [简体中文](README.zh-CN.md)
 
@@ -22,7 +22,7 @@ The clipboard cleaner that understands CJK — 中文 / 日本語 / 한국어 wr
 
 Select text in an agent TUI, hit `⌘C`, and your clipboard fills with rendering junk: 2-space margins on every line, `⏺` `❯` `⎿` (Claude Code) or `•` `›` (Codex) markers, `✻ Worked for 11s` spinner lines, and hard line breaks at the terminal width that shred your paragraphs.
 
-**claude-copy-cjk** is a tiny [Hammerspoon](https://www.hammerspoon.org/) interceptor that catches `⌘C` in your terminal, scores how agent-TUI-like the copied text is, and cleans it *before you paste* — conservatively, so code, tables, and everything non-agent pass through untouched.
+**agent-copy-cjk** is a tiny [Hammerspoon](https://www.hammerspoon.org/) interceptor that catches `⌘C` in your terminal, scores how agent-TUI-like the copied text is, and cleans it *before you paste* — conservatively, so code, tables, and everything non-agent pass through untouched.
 
 ```diff
 - ⏺ 修复方案如下：
@@ -36,11 +36,17 @@ Select text in an agent TUI, hit `⌘C`, and your clipboard fills with rendering
 + 这个方案的关键在于我们可以直接复用 Hammerspoon 提供的 eventtap 机制来拦截快捷键，不需要修改任何系统设置就能生效。
 ```
 
+### Codex CLI gets the same treatment
+
+Codex renders its own junk — `•` response bullets, `›` prompt echoes, hanging-indent list wraps. Same interceptor, same clean paste:
+
+<img src="assets/hero-codex.svg" alt="Codex CLI before: • markers, margins, hanging-indent list wraps. After: flush-left text with list items rejoined." width="100%">
+
 ## Install in 30 seconds
 
 ```bash
-git clone https://github.com/kindtree/claude-copy-cjk.git
-cd claude-copy-cjk && ./install.sh
+git clone https://github.com/kindtree/agent-copy-cjk.git
+cd agent-copy-cjk && ./install.sh
 ```
 
 The script installs [Hammerspoon](https://www.hammerspoon.org/) if missing, drops two Lua files into `~/.hammerspoon/`, and wires them into your config. Grant Accessibility permission once, reload, done — there is no UI, it just works on every `⌘C`.
@@ -50,9 +56,9 @@ The script installs [Hammerspoon](https://www.hammerspoon.org/) if missing, drop
 Already inside Claude Code / Codex? Paste this prompt and it handles everything:
 
 ```text
-Set up claude-copy-cjk on this Mac:
+Set up agent-copy-cjk on this Mac:
 
-1. Clone https://github.com/kindtree/claude-copy-cjk.git to ~/Code/claude-copy-cjk.
+1. Clone https://github.com/kindtree/agent-copy-cjk.git to ~/Code/agent-copy-cjk.
 2. Run ./install.sh from the repo root. It installs Hammerspoon via Homebrew if
    missing, copies init.lua to ~/.hammerspoon/claude-copy.lua and clean.lua to
    ~/.hammerspoon/clean.lua, and appends one dofile line to ~/.hammerspoon/init.lua.

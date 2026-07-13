@@ -1,5 +1,6 @@
--- claude-copy: Auto-clean Claude Code clipboard artifacts
--- https://github.com/andersmyrmel/claude-copy
+-- agent-copy-cjk: Auto-clean Claude Code / Codex CLI clipboard artifacts
+-- https://github.com/kindtree/agent-copy-cjk
+-- Fork of: https://github.com/andersmyrmel/claude-copy
 --
 -- Intercepts Cmd+C in terminal apps, performs the real copy,
 -- then conditionally cleans Claude TUI artifacts in the copied text.
